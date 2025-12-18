@@ -1,0 +1,10 @@
+requests
+feedparser
+pandas
+yfinance
+beautifulsoup4
+streamlit
+plotly
+statsmodels
+scikit-learn
+
