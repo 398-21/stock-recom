@@ -1,188 +1,241 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 
-# ---------- Core UI Labels (emoji + plain) ----------
+def tooltip_map() -> Dict[str, str]:
+    return {
+        "DILUTION": "How likely the company raises money by selling more shares (can push price down).",
+        "TREND": "A quick trend label using moving averages (who is winning recently).",
+        "ATR": "Average True Range: typical daily wiggle size in dollars.",
+        "RVOL": "Relative Volume: today’s volume compared with normal. Low = nobody cares; high = attention.",
+        "FORECAST_CONF": "Forecast confidence depends on how stable the recent price behavior is (less noise = higher confidence).",
+        "FIN_HEALTH": "This is not ‘profit.’ It is a financing stability guess: cash/runway/solvency-type hints.",
+    }
+
 
 def emoji_action_label(action: str) -> str:
     a = (action or "").upper()
     if a == "BUY":
-        return "🟢 BUY"
-    if a == "WAIT":
-        return "🟡 WAIT"
+        return "BUY"
     if a == "AVOID":
-        return "🔴 AVOID"
-    return a
+        return "AVOID"
+    return "WAIT"
 
 
-def size_recommendation(mode: str, confidence: str, decision: str) -> Tuple[str, str]:
+def _bucket_conf(conf: str) -> str:
+    c = (conf or "").upper()
+    if c in ("HIGH", "H"):
+        return "HIGH"
+    if c in ("MED", "MEDIUM", "M"):
+        return "MED"
+    return "LOW"
+
+
+def size_recommendation(
+    *,
+    mode: str,
+    confidence: str,
+    decision: str,
+    fin_health_level: str = "MED",
+    runway_months_est: Optional[float] = None,
+) -> Tuple[str, str]:
     """
-    Returns: (best_move_line, rationale_one_liner)
-
-    Philosophy:
-    - Confidence is about forecast reliability (headline/vol regime).
-    - Decision is about setup quality (your rules-based GO/WAIT/AVOID).
-    - Mode changes how strict execution should be.
+    Returns:
+      (best_move_line, reasoning_caption)
+    Uses: mode + forecast confidence + decision + financing stability/runway.
     """
     m = (mode or "HYBRID").upper()
-    c = (confidence or "MED").upper()
-    d = (decision or "WAIT").upper()
+    conf = _bucket_conf(confidence)
+    dec = (decision or "WAIT").upper()
+    fin = (fin_health_level or "MED").upper()
 
-    # Base from decision
-    if "AVOID" in d:
-        base = "WAIT"
-    elif "WAIT" in d:
-        base = "WAIT"
-    else:
-        base = "NORMAL SIZE"  # only if decision is GO/BUY in your system
+    # Hard safety rail: if runway looks short, force small/wait.
+    runway_flag = False
+    if runway_months_est is not None:
+        if runway_months_est < 6:
+            runway_flag = True
+        elif runway_months_est < 12 and fin == "LOW":
+            runway_flag = True
 
-    # Confidence overlay
-    if c == "LOW":
-        # Even if a setup is decent, sizing must be conservative
-        if base == "NORMAL SIZE":
-            base = "SMALL SIZE"
-        else:
-            base = "WAIT"
-        why = "Headline/vol regime is unstable → sizing must be conservative."
-    elif c == "MED":
-        if base == "NORMAL SIZE":
-            base = "SMALL SIZE" if m == "HYBRID" else "NORMAL SIZE"
-        why = "Some uncertainty present → prefer smaller exposure unless setup is very clean."
-    else:
-        why = "Calmer regime → forecast bands are more reliable; execution is easier."
+    if runway_flag:
+        return (
+            "**Best move: WAIT or VERY SMALL size (runway risk)**",
+            "Even if price signals look good, short runway increases the chance of financing/dilution shocks.",
+        )
 
-    # Mode strictness
-    if m == "HYBRID" and base == "NORMAL SIZE":
-        # Hybrid requires both catalyst cleanliness + technical alignment
-        base = "SMALL SIZE"
-        why = "Hybrid mode is strict → even on good setups, start smaller and scale on confirmation."
+    if dec == "AVOID":
+        return ("**Best move: AVOID**", "Rules-based decision says risk is high or thesis/timing is poor.")
+    if dec == "WAIT":
+        if conf == "HIGH" and m == "PURE_TECHNICAL":
+            return ("**Best move: WAIT (but watch for breakout)**", "High-confidence regime but no trigger yet.")
+        if conf == "LOW":
+            return ("**Best move: WAIT / SMALL**", "Low confidence means the tape is noisy; reduce size.")
+        return ("**Best move: WAIT**", "No strong alignment yet.")
 
-    line = f"Best move: **{base}**"
-    return line, why
-
-
-# ---------- Kid-level tooltips / explainers ----------
-
-def tooltip_map() -> Dict[str, str]:
-    return {
-        "AVWAP": (
-            "Anchored VWAP = the average price paid (weighted by volume) since a chosen date.\n"
-            "Above it: buyers since the anchor are mostly winning.\n"
-            "Below it: buyers since the anchor are mostly losing."
-        ),
-        "SWEEP": (
-            "Sweep = price quickly takes an obvious high/low to trigger stops, then reverses.\n"
-            "It often signals big players hunting liquidity."
-        ),
-        "BOS": (
-            "BOS (Break of Structure) = price breaks a previous swing high/low in a clear way.\n"
-            "It can signal trend continuation or reversal."
-        ),
-        "DILUTION": (
-            "Dilution risk = the company may issue/sell more shares.\n"
-            "More shares can cap price or push it down short-term."
-        ),
-        "TREND": (
-            "Trend regime uses moving averages.\n"
-            "If price < SMA20 < SMA50 → downtrend (market memory says it's drifting down)."
-        ),
-        "RVOL": (
-            "Relative volume compares today's volume to normal.\n"
-            "Low RVOL = few people paying attention; high RVOL = attention is back."
-        ),
-        "ATR": (
-            "ATR is the typical daily wiggle size.\n"
-            "Higher ATR means bigger swings and larger risk per day."
-        ),
-        "FORECAST_CONF": (
-            "Forecast confidence measures how trustworthy the range forecast is.\n"
-            "High confidence = calm conditions. Low confidence = headline/event risk or high volatility."
-        ),
-    }
+    # GO
+    if conf == "LOW":
+        return ("**Best move: SMALL size**", "Direction is not reliable; treat as a probe, not a full position.")
+    if m == "PURE_CATALYST":
+        return ("**Best move: NORMAL size (catalyst posture ok)**", "In catalyst mode, timing matters more than precision.")
+    return ("**Best move: NORMAL size**", "Decision and confidence support taking the trade.")
 
 
-def kid_explainer_block(snapshot: Dict[str, str]) -> str:
+# ---------------- Glossary (Kid-mode) ----------------
+
+def glossary_block() -> str:
     """
-    snapshot keys you can pass (strings are ok):
+    Explains each technical term in simple language + what it usually implies.
+    """
+    g = [
+        ("Candle / Candlestick",
+         "A candle shows what price did in one time period: open, high, low, close.",
+         "Big body = strong move. Long wicks = rejection (price tried, failed)."),
+
+        ("Volume",
+         "How many shares traded. Think: how many people showed up to play.",
+         "High volume = attention/conviction. Low volume = sleepy market."),
+
+        ("SMA20 / SMA50",
+         "Simple Moving Average: average price over last 20/50 days. It is ‘trend memory.’",
+         "If price is above them, trend is healthier. If below, trend is weaker."),
+
+        ("Trend Regime (close < SMA20 < SMA50)",
+         "A quick label: price is below short-term average, and short-term is below long-term.",
+         "Usually means downtrend pressure. Rallies may get sold until it changes."),
+
+        ("AVWAP (Anchored VWAP)",
+         "Average price paid by traders since a chosen ‘anchor day’ (like earnings day, low, high).",
+         "Above AVWAP: buyers since anchor are winning → support. Below: many are losing → resistance."),
+
+        ("Support / Resistance",
+         "Support is a floor where price often bounces. Resistance is a ceiling where price often struggles.",
+         "Near support: buyers may defend. Near resistance: sellers may appear."),
+
+        ("Pivot / R1 / S1",
+         "Pivot is a reference level from last candle. R1 is first resistance, S1 first support.",
+         "Used as ‘map lines’ for where price might pause or bounce."),
+
+        ("ATR(14)",
+         "Average True Range: typical daily movement size (in dollars).",
+         "Bigger ATR = wilder price swings. Helps set stops/targets realistically."),
+
+        ("20D Volatility",
+         "How much price wiggles day-to-day (statistical).",
+         "High vol = unpredictable; low vol = calmer and more forecastable."),
+
+        ("RVOL (Relative Volume)",
+         "Today’s volume compared to normal volume.",
+         "RVOL > 1 = unusual attention. RVOL < 1 = quiet; moves can be weak/fake."),
+
+        ("Abnormal Volume",
+         "A flag that volume is unusually high compared to recent history.",
+         "High abnormal volume can mean ‘something is happening’ (breakout/news/positioning)."),
+
+        ("Liquidity Sweep",
+         "Price quickly takes an obvious high/low, then reverses. Like a ‘trap.’",
+         "Often signals stop-hunting before the real move starts."),
+
+        ("BOS (Break of Structure)",
+         "Price breaks a recent swing high/low with intent, changing the ‘story.’",
+         "BOS up can mean trend shift to bullish; BOS down can mean bearish continuation."),
+
+        ("7D Range (p05–p95)",
+         "A probabilistic ‘box’ where price is likely to stay 90% of the time.",
+         "Not direction. Just ‘how wide’ the next week could be."),
+
+        ("Expected Close (7D)",
+         "A statistical center estimate for 7 days out (not guaranteed).",
+         "Use it lightly; the range matters more than the exact number."),
+
+        ("Forecast Confidence: LOW / MED / HIGH",
+         "How trustworthy the forecast model is given recent behavior.",
+         "LOW means noisy/choppy/unstable → treat predictions cautiously and reduce size."),
+    ]
+
+    md = "### Glossary (simple meaning + what it suggests)\n"
+    for term, meaning, suggests in g:
+        md += f"**{term}**\n\n- Meaning: {meaning}\n- Suggests: {suggests}\n\n"
+    return md
+
+
+def kid_explainer_block(snapshot: dict) -> str:
+    """
+    snapshot keys you pass:
       avwap_signal, avwap_dist, trend, rvol, vol20, atr, sweep, bos, dilution_level, decision, mode
     """
-    avwap_signal = snapshot.get("avwap_signal", "N/A")
-    avwap_dist = snapshot.get("avwap_dist", "N/A")
-    trend = snapshot.get("trend", "N/A")
+    av = snapshot.get("avwap_signal", "N/A")
+    avd = snapshot.get("avwap_dist", "N/A")
+    tr = snapshot.get("trend", "N/A")
     rvol = snapshot.get("rvol", "N/A")
     vol20 = snapshot.get("vol20", "N/A")
     atr = snapshot.get("atr", "N/A")
     sweep = snapshot.get("sweep", "N/A")
     bos = snapshot.get("bos", "N/A")
-    dilution_level = snapshot.get("dilution_level", "N/A")
-    decision = snapshot.get("decision", "N/A")
+    dil = snapshot.get("dilution_level", "N/A")
+    dec = snapshot.get("decision", "N/A")
     mode = snapshot.get("mode", "N/A")
 
-    return f"""
-### Explain like I'm 10 (what these signals mean)
+    md = f"""
+### What the dashboard is saying (kid-level)
 
-**1) AVWAP**  
-- Signal: **{avwap_signal}** (distance: {avwap_dist})  
-- Meaning: If price is **below AVWAP**, most buyers since the anchor are **losing**, so bounces often get sold.
+**1) Decision (top result): {dec}**  
+This is the system’s final “go / wait / avoid” based on your chosen mode.
 
-**2) Sweep / BOS (big-money clues)**  
-- Sweep: **{sweep}**  
-- BOS: **{bos}**  
-- Meaning: If there is **no sweep and no BOS**, nothing “big” is happening yet — it’s usually a **waiting phase**.
+**2) Mode: {mode}**  
+- PURE_CATALYST: care more about catalyst cleanliness (financing/dilution) than short-term trend.  
+- HYBRID: need both catalyst cleanliness + a decent technical setup.  
+- PURE_TECHNICAL: care most about trend/levels/volume.
 
-**3) Dilution / Financing Risk**  
-- Level: **{dilution_level}**  
-- Meaning: Higher risk means the company might **sell more shares**, which can **cap price**.
+**3) Trend: {tr}**  
+If trend says downtrend, it means price has been sliding and buyers have not taken control yet.
 
-**4) Trend + Volume**  
-- Trend: **{trend}**  
-- Rel Volume: **{rvol}**  
-- 20D Vol: **{vol20}** | ATR: **{atr}**  
-- Meaning: Downtrend + low volume usually = **slow drift**, not explosive moves.
+**4) AVWAP signal: {av} (distance: {avd})**  
+- Above AVWAP: more buyers are in profit since the anchor → support is more likely.  
+- Below AVWAP: more buyers are trapped in loss → selling pressure is more likely.
 
-**5) Decision panel**  
-- Mode: **{mode}**  
-- Decision: **{decision}**  
-- Meaning: In HYBRID, you only act when **both** (a) catalyst posture is clean **and** (b) technicals align.
-"""
+**5) Volume interest: RVOL {rvol}**  
+- Around 1.0 = normal  
+- Much less than 1.0 = sleepy (moves can stall)  
+- Much more than 1.0 = attention (moves can be real)
+
+**6) Volatility / movement size: 20D vol {vol20}, ATR {atr}**  
+This tells how “wild” the stock is. If wild, small size is safer.
+
+**7) Smart-money footprints: Sweep {sweep}, BOS {bos}**  
+- Sweep = trap then reverse.  
+- BOS = breaks the “story” (trend shift).
+
+**8) Dilution / financing risk: {dil}**  
+High dilution risk means the company may create/sell shares; that can cap rallies.
+
+---
+
+""" + glossary_block()
+
+    return md
 
 
 def invalidation_box(mode: str) -> str:
     m = (mode or "HYBRID").upper()
-
     if m == "PURE_CATALYST":
-        return """
-### What would invalidate this catalyst thesis?
-
-Stop treating it as “hold through noise” if any of these happen:
-- **Dilution before the catalyst** (offering/ATM/PIPE that changes the payoff).
-- **Cash runway becomes insufficient** to reach the catalyst window.
-- **Official update delays/cancels** the catalyst or changes probability materially.
-- **Management guidance** implies funding pressure or shift in priorities.
-"""
+        return (
+            "**Invalidation examples (Catalyst mode):**\n\n"
+            "- New offering / ATM / shelf expands (dilution risk spikes)\n"
+            "- Catalyst timeline slips materially\n"
+            "- Thesis X no longer true (trial halted, FDA pushback, etc.)\n"
+        )
     if m == "PURE_TECHNICAL":
-        return """
-### What would invalidate this technical trade?
-
-Treat the setup as broken if:
-- Price **fails reclaim** of key level (AVWAP / prior swing) and closes back below.
-- A clear **BOS against** your position happens.
-- Relative volume stays dead and price chops (no follow-through).
-- ATR expands while structure deteriorates (risk up, edge down).
-"""
-    # HYBRID default
-    return """
-### What would invalidate this HYBRID setup?
-
-The HYBRID edge fails if either side breaks:
-
-**Catalyst side fails if:**
-- New offering/ATM/PIPE appears or financing posture worsens.
-- Cash runway risk rises before the catalyst window.
-
-**Technical side fails if:**
-- Price cannot reclaim/hold AVWAP and keeps closing below it.
-- No BOS + no volume return (no execution signal).
-"""
+        return (
+            "**Invalidation examples (Technical mode):**\n\n"
+            "- Breaks key support and does not reclaim\n"
+            "- Breakout fails: price returns below the breakout level on high volume\n"
+            "- Volatility spikes in wrong direction (stop should be hit quickly)\n"
+        )
+    return (
+        "**Invalidation examples (Hybrid mode):**\n\n"
+        "- Dilution risk rises AND price loses AVWAP/support\n"
+        "- No BOS confirmation after a sweep\n"
+        "- Volume fades on rallies (weak demand)\n"
+    )
