@@ -477,6 +477,36 @@ def analyze_kline(
     swing_low_st = float(recent_lows.min())
     swing_high_st = float(recent_highs.max())
 
+    # Fallback: if K-line side is NONE but longs are allowed, create a basic range long plan,
+    # but only when confidence is at least 30/100 (avoid pure noise).
+    long_side_allowed = (allowed_sides or "BOTH").upper() in ("BOTH", "LONGS_ONLY")
+    if (
+        side == "NONE"
+        and long_side_allowed
+        and confidence_score >= 30
+        and np.isfinite(swing_low_st)
+        and np.isfinite(swing_high_st)
+    ):
+        side = "LONG"
+        primary_entry = swing_low_st
+        secondary_entry = None
+        aggressive_entry = None
+        entry_reasons.append(
+            "Structure looks range-like or noisy, so a basic long-only range plan is suggested: "
+            "consider buying near recent support (swing low) and aiming toward the top of the range, "
+            "instead of forcing a breakout trade."
+        )
+
+    # Enrich direction extent with distance to support / resistance
+    if np.isfinite(swing_low_st) and np.isfinite(swing_high_st):
+        gap_support_pct = max(0.0, (last_close - swing_low_st) / last_close * 100.0)
+        gap_res_pct = max(0.0, (swing_high_st - last_close) / last_close * 100.0)
+        direction_extent = (
+            direction_extent
+            + f" Within this recent range, price is about {gap_support_pct:.1f}% above nearby support "
+              f"(~{swing_low_st:.2f}) and {gap_res_pct:.1f}% below nearby resistance (~{swing_high_st:.2f})."
+        )
+
     if primary_entry is not None and side in ("LONG", "SHORT"):
         if side == "LONG":
             # clamp down-side to ~20% and/or swing low
@@ -711,12 +741,12 @@ def analyze_kline(
             "No major hammer, doji, or engulfing patterns are dominating the most recent candles."
         )
 
-    if orig_side == "LONG":
+    if trend == "UP" and bias == "BULL":
         expl_parts.append(
             "Because the regime leans bullish, the entries focus on pullbacks toward support (like SMA20 or "
             "recent swing lows) rather than chasing extended highs."
         )
-    elif orig_side == "SHORT":
+    elif trend == "DOWN" and bias == "BEAR":
         expl_parts.append(
             "Because the regime leans bearish, the entries focus on rallies back into resistance (like SMA20 or "
             "recent swing highs) rather than shorting into panic lows."
@@ -781,4 +811,3 @@ def analyze_kline(
         scenarios_note=scenarios_note,
         rsi_last=rsi_last,
     )
-
