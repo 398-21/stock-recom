@@ -26,6 +26,9 @@ from analysis.playbook import build_post_event_playbook
 # RE-ADD: price movement “engine”
 from analysis.direction import analyze_direction
 
+# NEW: K-Line / candlestick reader (trend + entries + explanation)
+from analysis.kline import analyze_kline
+
 # RE-ADD: chart helpers (range box + level labels + background tint)
 from ui.chart_helpers import compute_sr_levels, add_levels_to_chart, bias_tint
 
@@ -36,6 +39,21 @@ from ui.explainers import (
     kid_explainer_block,
     invalidation_box,
 )
+
+def prob_badge(pct: int) -> str:
+    """Return a coloured label for LOW / MED / HIGH probability."""
+    if pct >= 70:
+        label = "HIGH"
+        color = "#d90429"   # red
+    elif pct >= 40:
+        label = "MEDIUM"
+        color = "#fca311"   # amber
+    else:
+        label = "LOW"
+        color = "#2b9348"   # green
+
+    return f"<span style='color:{color}; font-weight:600'>{label}</span> ({pct}%)"
+
 
 st.set_page_config(page_title="Daily Catalyst Scanner", layout="wide")
 
@@ -282,6 +300,19 @@ interval = st.sidebar.selectbox("Interval", ["1d", "1h"], index=0)
 mode = st.sidebar.selectbox("Decision Mode", ["PURE_CATALYST", "HYBRID", "PURE_TECHNICAL"], index=1)
 kid_mode = st.sidebar.toggle("Kid-mode explanations", value=True)
 
+# NEW: which direction the K-Line module is allowed to trade
+direction_mode_label = st.sidebar.selectbox(
+    "Trade direction",
+    ["LONGS ONLY (no shorts)", "SHORTS ONLY (no longs)", "LONGS + SHORTS"],
+    index=0,  # default: you are a long-only trader
+)
+
+direction_mode = {
+    "LONGS ONLY (no shorts)": "LONGS_ONLY",
+    "SHORTS ONLY (no longs)": "SHORTS_ONLY",
+    "LONGS + SHORTS": "BOTH",
+}[direction_mode_label]
+
 st.sidebar.markdown("---")
 st.sidebar.write("SEC EDGAR requires `SEC_USER_AGENT` env var (Streamlit secrets).")
 st.sidebar.code('SEC_USER_AGENT = "StockEntryAnalyzer/1.0 (email: you@example.com)"', language="toml")
@@ -502,10 +533,32 @@ st.markdown("---")
 # ---------------- Ownership / Positioning ----------------
 st.subheader("Positioning / Ownership (Context)")
 o1, o2, o3, o4 = st.columns(4)
-o1.metric("Float", f"{own.float_shares:,.0f}" if own.float_shares else "N/A")
-o2.metric("% Inst Held", f"{(own.inst_held_pct*100):.1f}%" if own.inst_held_pct is not None else "N/A")
-o3.metric("% Insider Held", f"{(own.insider_held_pct*100):.1f}%" if own.insider_held_pct is not None else "N/A")
-o4.metric("% Short of Float", f"{(own.short_float_pct*100):.1f}%" if own.short_float_pct is not None else "N/A")
+
+float_label = (
+    f"{own.float_shares:,.0f}"
+    if getattr(own, "float_shares", None)
+    else "Not provided by Yahoo for this ticker"
+)
+inst_label = (
+    f"{(own.inst_held_pct*100):.1f}%"
+    if getattr(own, "inst_held_pct", None) is not None
+    else "Not provided"
+)
+insider_label = (
+    f"{(own.insider_held_pct*100):.1f}%"
+    if getattr(own, "insider_held_pct", None) is not None
+    else "Not provided"
+)
+short_label = (
+    f"{(own.short_float_pct*100):.1f}%"
+    if getattr(own, "short_float_pct", None) is not None
+    else "Not provided"
+)
+
+o1.metric("Float", float_label)
+o2.metric("% Inst Held", inst_label)
+o3.metric("% Insider Held", insider_label)
+o4.metric("% Short of Float", short_label)
 
 st.write(f"**Flow hint:** {own.trapped_holder_hint}")
 if own.atm_or_shelf_flag:
@@ -593,24 +646,7 @@ try:
 except Exception:
     pass
 
-# If you already compute SR and 7D bands elsewhere, reuse them.
-# Otherwise, set placeholders:
-sr_levels = None
-try:
-    from ui.chart_helpers import compute_sr_levels
-    sr_levels = compute_sr_levels(daily)
-except Exception:
-    sr_levels = None
-
-range_low = None
-range_high = None
-# If you have fc_risk bands, you can use them:
-try:
-    if fc_risk is not None:
-        range_low = float(fc_risk.bands.get("p05"))
-        range_high = float(fc_risk.bands.get("p95"))
-except Exception:
-    pass
+sr_levels = compute_sr_levels(daily, lookback=60)
 
 df_levels = build_levels_table(
     last_close=last_close,
@@ -646,7 +682,196 @@ st.plotly_chart(make_volatility_chart(daily), width="stretch")
 
 st.markdown("---")
 
-# ---------------- Forecast / Posture (kept, but now also uses direction engine) ----------------
+# ---------------- NEW: K-Line Readout (Candles + Entries + Confidence) ----------------
+st.subheader("K-Line Readout (Candlestick Trend + Entry / Stop / Target Plan)")
+
+krep = analyze_kline(daily, sma20=sma20, sma50=sma50, allowed_sides=direction_mode)
+
+k1, k2, k3, k4, k5 = st.columns([1.1, 1.1, 1.1, 1.2, 1.0])
+
+with k1:
+    st.metric("K-Line Trend", krep.trend)
+
+with k2:
+    st.metric("Bias", krep.bias)
+
+with k3:
+    st.metric("K-Line Confidence", f"{krep.confidence_score}/100 ({krep.confidence_label})")
+
+with k4:
+    if krep.last_close is not None:
+        st.metric("Current Close", f"{krep.last_close:.4f}")
+    st.write("**Direction Extent (vol-adjusted):**")
+    st.caption(krep.direction_extent)
+
+with k5:
+    if krep.rsi_last is not None:
+        if krep.rsi_last < 30:
+            rsi_tag = "Oversold"
+        elif krep.rsi_last > 70:
+            rsi_tag = "Overbought"
+        else:
+            rsi_tag = "Neutral"
+        st.metric("RSI(14)", f"{krep.rsi_last:.1f}", rsi_tag)
+    else:
+        st.metric("RSI(14)", "N/A")
+
+
+# Primary execution plan
+if (
+    krep.side in ("LONG", "SHORT")
+    and krep.primary_entry is not None
+    and krep.primary_stop is not None
+    and krep.primary_target is not None
+):
+    e1, e2, e3, e4 = st.columns([1.0, 1.1, 1.1, 1.1])
+    with e1:
+        st.metric("Side", krep.side)
+    with e2:
+        st.metric("Primary Entry", f"{krep.primary_entry:.4f}")
+    with e3:
+        st.metric("Stop Loss", f"{krep.primary_stop:.4f}")
+    with e4:
+        st.metric("First Target", f"{krep.primary_target:.4f}")
+
+    st.caption(
+        "Default K-line plan: use the primary entry as the main zone, cut risk if price breaks the stop level, "
+        "and start trimming or taking profit around the first target. The numbers are built from recent candles, "
+        "moving averages and nearby swing highs/lows."
+    )
+    # NEW: tell you if now is an entry or a wait
+    if krep.current_vs_entry_note:
+        st.caption(krep.current_vs_entry_note)
+else:
+    st.write("No high-conviction primary execution plan; structure is too mixed or range-bound.")
+
+st.write("**Suggested Entry Zones (from K-Lines)**")
+if krep.side in ("LONG", "SHORT"):
+    st.write(f"- **Side:** {krep.side}")
+else:
+    st.write("- **Side:** NONE (structure looks more range-bound)")
+
+entry_rows = []
+if krep.primary_entry is not None:
+    entry_rows.append(
+        {
+            "Type": "Primary",
+            "Entry": round(krep.primary_entry, 4),
+            "Stop Loss": round(krep.primary_stop, 4) if krep.primary_stop is not None else None,
+            "First Target": round(krep.primary_target, 4) if krep.primary_target is not None else None,
+            "Comment": "Most balanced zone based on K-line trend and moving averages.",
+        }
+    )
+if krep.secondary_entry is not None:
+    entry_rows.append(
+        {
+            "Type": "Secondary",
+            "Entry": round(krep.secondary_entry, 4),
+            "Stop Loss": None,
+            "First Target": None,
+            "Comment": "Deeper pullback zone (higher reward, higher risk).",
+        }
+    )
+if krep.aggressive_entry is not None:
+    entry_rows.append(
+        {
+            "Type": "Aggressive",
+            "Entry": round(krep.aggressive_entry, 4),
+            "Stop Loss": None,
+            "First Target": None,
+            "Comment": "Breakout/continuation-style entry if momentum is strong.",
+        }
+    )
+
+if entry_rows:
+    st.dataframe(pd.DataFrame(entry_rows), width="stretch", height=220)
+else:
+    st.info("No clear K-line-based entry zones identified. Market may be too noisy or flat.")
+
+st.write("**How this K-Line confidence is deduced (tape-only)**")
+st.caption(krep.explanation)
+
+if krep.reasons:
+    with st.expander("Detailed K-Line reasoning (for advanced users)"):
+        for r in krep.reasons[:15]:
+            st.write(f"- {r}")
+
+if kid_mode:
+    with st.expander("Explain K-Line terms (kid-mode)", expanded=False):
+        st.markdown(
+            "- **Trend**: pattern of candles mostly moving up, down, or sideways.\n"
+            "- **Entry Zone**: price area where it usually makes more sense to buy (for longs) or sell (for shorts) "
+            "instead of clicking randomly.\n"
+            "- **K-Line Confidence**: how clean the candles and moving averages look, from 0 to 100, based only on "
+            "price action.\n"
+            "- **Hammer / Doji / Engulfing**: special candle shapes that show strong fights between buyers and sellers."
+        )
+st.markdown("### Long-Only Dip Scout (where to pre-place buy orders)")
+
+if krep.dip_upper is not None and krep.dip_lower is not None:
+    d1, d2, d3 = st.columns([1.1, 1.1, 1.2])
+    with d1:
+        st.metric("Dip band upper (nearest support)", f"{krep.dip_upper:.4f}")
+    with d2:
+        st.metric("Dip band lower (max pain)", f"{krep.dip_lower:.4f}")
+    with d3:
+        st.metric("Dip-band confidence", f"{krep.dip_confidence}/100")
+
+    st.caption(
+        "This band is designed for **auto-buys on the long side**, even if the main K-line side is SHORT or "
+        "AVOID. It does not guarantee a bottom; it just marks where the candles and volatility suggest the "
+        "current selloff is most likely to exhaust."
+    )
+    st.caption(krep.dip_note)
+else:
+    st.caption(
+        "Not enough history or structure to suggest a meaningful dip-buy band for long-only orders."
+    )
+
+st.markdown("### 3-Day Tape Scenario Guide (heuristic, tape-based)")
+
+c1, c2, c3, c4 = st.columns([1.3, 1.3, 1.3, 1.0])
+with c1:
+    st.metric("Risk support breaks (3-day)", f"{krep.prob_support_break_3d}%")
+with c2:
+    st.metric("Chance of 3-day bounce", f"{krep.prob_bounce_3d}%")
+with c3:
+    st.metric("Chance to break resistance (3-day)", f"{krep.prob_resistance_break_3d}%")
+with c4:
+    if krep.rsi_last is not None:
+        if krep.rsi_last < 30:
+            rsi_tag = "Oversold"
+        elif krep.rsi_last > 70:
+            rsi_tag = "Overbought"
+        else:
+            rsi_tag = "Neutral"
+        st.metric("RSI(14)", f"{krep.rsi_last:.1f}", rsi_tag)
+    else:
+        st.metric("RSI(14)", "N/A")
+
+# Colour-coded legend under the metrics
+st.markdown(
+    f"""
+- **Support break risk:** {prob_badge(krep.prob_support_break_3d)}  
+- **3-day bounce chance:** {prob_badge(krep.prob_bounce_3d)}  
+- **Resistance break chance:** {prob_badge(krep.prob_resistance_break_3d)}
+""",
+    unsafe_allow_html=True,
+)
+
+st.caption(
+    "These percentages are **scenario odds inferred from the tape** (trend direction/strength, volatility, moving "
+    "averages, RSI, and how price sits vs support/resistance). They are heuristics, not statistically calibrated "
+    "probabilities, and should be used together with your own judgement and the catalyst/quant modules."
+)
+
+if krep.scenarios_note:
+    st.caption(krep.scenarios_note)
+
+
+st.markdown("---")
+
+# ---------------- Forecast / Posture (Mode-aware, with joint confidence) ----------------
 st.subheader("Forecast / Posture (Mode-aware)")
 
 if str(mode).upper() == "PURE_CATALYST":
@@ -657,17 +882,55 @@ if str(mode).upper() == "PURE_CATALYST":
 else:
     show_forecast = True
 
+# Helper: map quant forecast to a 0–100 score using P(up)
+def _quant_conf_score(fc) -> int:
+    if fc is None or getattr(fc, "p_up", None) is None:
+        return 50
+    try:
+        return int(round(fc.p_up * 100))
+    except Exception:
+        return 50
+
+def _label_from_score(score: int) -> str:
+    if score >= 70:
+        return "HIGH"
+    elif score >= 50:
+        return "MED"
+    return "LOW"
+
 if show_forecast:
     if fc_risk is None or fc_base is None:
         st.warning(f"Forecast unavailable: {forecast_err}")
     else:
+        # Quant confidence from risk-adjusted forecast
+        quant_conf_score = _quant_conf_score(fc_risk)
+        quant_conf_label = _label_from_score(quant_conf_score)
+
+        # Joint confidence: average of quant (P(up)) and K-line confidence
+        joint_conf_score = int(round(0.5 * quant_conf_score + 0.5 * krep.confidence_score))
+        joint_conf_label = _label_from_score(joint_conf_score)
+
+        # Show forecast confidence (model) and then joint
         conf = fc_risk.confidence
         if conf == "HIGH":
-            st.success("Forecast Confidence: HIGH")
+            st.success("Forecast Confidence (model): HIGH")
         elif conf == "MED":
-            st.warning("Forecast Confidence: MED")
+            st.warning("Forecast Confidence (model): MED")
         else:
-            st.error("Forecast Confidence: LOW")
+            st.error("Forecast Confidence (model): LOW")
+
+        jc1, jc2, jc3 = st.columns([1.2, 1.2, 2.6])
+        with jc1:
+            st.metric("Quant P(Up)", f"{fc_risk.p_up*100:.1f}%")
+        with jc2:
+            st.metric("Quant Conf Score", f"{quant_conf_score}/100 ({quant_conf_label})")
+        with jc3:
+            st.metric("Joint Confidence (Quant + K-Line)", f"{joint_conf_score}/100 ({joint_conf_label})")
+
+        st.caption(
+            "Joint confidence blends the probabilistic model (P(up) from the EWMA forecast) with the tape-based "
+            "K-line confidence. It is higher when both the quant model and the candles point in the same direction."
+        )
 
         # IMPORTANT: best move now includes financing stability + runway
         best_line, best_why = size_recommendation(
